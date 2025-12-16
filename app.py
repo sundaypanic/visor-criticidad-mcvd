@@ -3,288 +3,256 @@ import pandas as pd
 from pyvis.network import Network
 import tempfile
 import streamlit.components.v1 as components
-from fpdf import FPDF
+import plotly.graph_objects as go
 from datetime import datetime
-import random
-import time
 
-# --- 1. CLASE DE INTERFAZ DE HARDWARE (Simulación de Capa OT) ---
-class HardwareController:
-    """
-    Esta clase gestiona la comunicación con la capa física (PLCs, Relés, Sensores).
-    Para efectos de la patente, esta es la interfaz que ejecuta la acción física.
-    """
-    def __init__(self):
-        # En producción, aquí se inicializaría la conexión Modbus/TCP o IEC 61850
-        pass
+# --- IMPORTACIONES PROFESIONALES ---
+# Asegúrate de tener la carpeta 'src' creada con engine.py y reports.py
+from src.engine import CriticalityEngine 
+from src.reports import create_pdf_report 
 
-    def read_sensors(self, asset_id):
-        """
-        Simula la lectura de sensores en tiempo real.
-        En entorno real: return client.read_holding_registers(address, count)
-        """
-        # Simulación de variables físicas con ruido aleatorio
-        return {
-            'temp_aceite': random.uniform(45.0, 105.0), # Temperatura ºC
-            'vibracion': random.uniform(0.1, 15.0),     # mm/s
-            'carga': random.uniform(20.0, 110.0)        # % de carga
-        }
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="MCVD: Digital Twin & Protección",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    page_icon="⚡"
+)
 
-    def send_trip_signal(self, asset_id, reason):
-        """
-        ENVÍA LA ORDEN DE CORTE AL INTERRUPTOR AUTOMÁTICO.
-        Esta función contiene la 'Actividad Inventiva' de actuación física.
-        """
-        # --- ZONA DE CONEXIÓN FÍSICA (PATENTE) ---
-        # Ejemplo: client.write_coil(address_trip_coil, True)
-        # -----------------------------------------
-        
-        # Log para la interfaz HMI
-        return True
-
-# --- 2. LÓGICA DE NEGOCIO Y PROTECCIÓN (Motor MCVD) ---
-class CriticalityEngine:
-    def __init__(self, w_safety, w_operational, w_env):
-        self.weights = {'S': w_safety, 'O': w_operational, 'E': w_env}
-        self.hardware = HardwareController()
-
-    def _calculate_aging_factor(self, install_year, useful_life_years):
-        current_year = datetime.now().year
-        age = current_year - install_year
-        life_consumed = age / useful_life_years
-        if life_consumed <= 0.5: return 0.0
-        elif life_consumed <= 1.0: return life_consumed * 0.2
-        else: return 0.2 + ((life_consumed - 1.0) * 0.5)
-
-    def evaluate_protection_logic(self, row):
-        """
-        ALGORITMO ADAPTATIVO (PATENTE):
-        Reduce los umbrales de disparo (Trip) basándose en la salud calculada (MCVD).
-        """
-        # 1. Leer estado físico actual
-        sensors = self.hardware.read_sensors(row['id'])
-        mcvd_index = row['MCVD_Index']
-
-        # 2. Calcular Umbrales Dinámicos
-        # Un equipo crítico (MCVD alto) tiene menos tolerancia térmica y mecánica.
-        
-        # Base: 100ºC. Por cada punto de MCVD, restamos tolerancia.
-        # Si MCVD es 10 (muy crítico), el límite baja drásticamente.
-        limit_temp = 100.0 - (mcvd_index * 2.5) 
-        limit_vib = 12.0 - (mcvd_index * 0.8)
-
-        status = "NORMAL"
-        trip_action = False
-        msg = "Estable"
-
-        # 3. Comparador Lógico
-        if sensors['temp_aceite'] > limit_temp:
-            status = "TRIP (TEMP)"
-            trip_action = True
-            msg = f"T.Aceite {sensors['temp_aceite']:.1f}ºC > Límite Dinámico {limit_temp:.1f}ºC"
-        
-        elif sensors['vibracion'] > limit_vib:
-            status = "TRIP (VIB)"
-            trip_action = True
-            msg = f"Vibración {sensors['vibracion']:.1f}mm/s > Límite Dinámico {limit_vib:.1f}mm/s"
-
-        # 4. Ejecución de Protección
-        if trip_action:
-            self.hardware.send_trip_signal(row['id'], msg)
-        
-        return pd.Series([sensors['temp_aceite'], sensors['vibracion'], status, msg])
-
-    def compute_matrix(self, df):
-        # 1. Cálculo Estático
-        df['F_obs'] = df.apply(lambda row: self._calculate_aging_factor(row['install_year'], row['useful_life']), axis=1)
-        df['Impact_Score'] = (self.weights['S'] * df['S_score']) + (self.weights['O'] * df['O_score']) + (self.weights['E'] * df['E_score'])
-        df['MCVD_Index'] = (df['Impact_Score'] * (1 + df['F_obs'])) / df['R_red']
-        
-        return df
-
-# --- 3. GENERADOR DE REPORTES PDF ---
-class ReportGenerator(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 15)
-        self.cell(0, 10, 'Informe Técnico de Criticidad & Disparos (MCVD)', 0, 1, 'C')
-        self.set_font('Arial', 'I', 10)
-        self.cell(0, 10, f'Fecha de Emisión: {datetime.now().strftime("%d/%m/%Y %H:%M")}', 0, 1, 'C')
-        self.ln(10)
-
-def create_pdf_report(df_sorted):
-    pdf = ReportGenerator()
-    pdf.add_page()
-    pdf.set_font('Arial', '', 11)
-    
-    # Resumen de Disparos
-    tripped = df_sorted[df_sorted['RealTime_Status'].str.contains("TRIP")]
-    
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '1. LOG DE ACTUACIONES DEL SISTEMA DE PROTECCIÓN', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    if not tripped.empty:
-        pdf.set_text_color(255, 0, 0)
-        pdf.multi_cell(0, 7, f"¡ATENCIÓN! El sistema ha enviado señales de disparo a {len(tripped)} activos para prevenir fallos catastróficos.")
-        pdf.set_text_color(0, 0, 0)
-        pdf.ln(5)
-        for _, row in tripped.iterrows():
-            pdf.cell(0, 7, f"-> ACTIVO: {row['label']} | CAUSA: {row['RealTime_Msg']}", 0, 1)
-    else:
-        pdf.cell(0, 7, "El sistema opera dentro de los parámetros normales. Sin disparos registrados.", 0, 1)
-
-    pdf.ln(10)
-    pdf.set_font('Arial', 'B', 12)
-    pdf.cell(0, 10, '2. MATRIZ DE RIESGO ESTÁTICO', 0, 1)
-    pdf.set_font('Arial', '', 10)
-    
-    for index, row in df_sorted.head(5).iterrows():
-        pdf.cell(0, 7, f"{row['label']} - Index: {row['MCVD_Index']:.2f}", 0, 1)
-        
-    return pdf.output(dest='S').encode('latin-1')
-
-# --- 4. CONFIGURACIÓN DE LA APP STREAMLIT ---
-st.set_page_config(page_title="MCVD: Sistema de Protección Activa", layout="wide")
-
-st.title("⚡ Sistema MCVD: Protección Eléctrica Adaptativa")
+# --- ESTÉTICA CYBERPUNK / SCADA (NIVEL 1) ---
 st.markdown("""
-**Modo:** Supervisión y Control en Tiempo Real.  
-*Este sistema ajusta los relés de protección basándose en el índice de obsolescencia y criticidad.*
-""")
+<style>
+    /* 1. Fondo Principal: Negro Profundo con Grid Digital */
+    .stApp {
+        background-color: #050505;
+        background-image: linear-gradient(0deg, transparent 24%, rgba(0, 255, 0, .05) 25%, rgba(0, 255, 0, .05) 26%, transparent 27%, transparent 74%, rgba(0, 255, 0, .05) 75%, rgba(0, 255, 0, .05) 76%, transparent 77%, transparent), linear-gradient(90deg, transparent 24%, rgba(0, 255, 0, .05) 25%, rgba(0, 255, 0, .05) 26%, transparent 27%, transparent 74%, rgba(0, 255, 0, .05) 75%, rgba(0, 255, 0, .05) 76%, transparent 77%, transparent);
+        background-size: 50px 50px;
+    }
+    
+    /* 2. Tarjetas y Métricas: Efecto Cristal + Borde Neón */
+    div[data-testid="stMetric"], div[data-testid="stExpander"] {
+        background-color: rgba(10, 10, 10, 0.8) !important;
+        border: 1px solid #00FF41 !important; /* Verde Matrix */
+        box-shadow: 0 0 15px rgba(0, 255, 65, 0.1);
+        border-radius: 5px;
+        color: #fff;
+    }
+    
+    /* 3. Textos y Títulos: Brillantes */
+    h1, h2, h3 {
+        color: #00FFFF !important; /* Cyan Futurista */
+        font-family: 'Courier New', monospace;
+        text-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+        letter-spacing: 2px;
+    }
+    
+    /* 4. Etiquetas de métricas y valores */
+    div[data-testid="stMetricLabel"] p {
+        color: #00FFFF !important;
+        font-weight: bold;
+    }
+    div[data-testid="stMetricValue"] div {
+        color: #00FF41 !important;
+        text-shadow: 0 0 10px rgba(0, 255, 65, 0.8);
+    }
 
-# --- 5. SIDEBAR ---
-st.sidebar.header("⚙️ Parametrización")
-w_s = st.sidebar.slider("Peso Seguridad (S)", 0.0, 1.0, 0.5, 0.05)
-w_o = st.sidebar.slider("Peso Operacional (O)", 0.0, 1.0, 0.4, 0.05)
-w_e = st.sidebar.slider("Peso Ambiental (E)", 0.0, 1.0, 0.1, 0.05)
+    /* 5. Botones: Estilo Reactor */
+    .stButton>button {
+        background: linear-gradient(90deg, #000000, #004400);
+        color: #00FF41;
+        border: 1px solid #00FF41;
+        font-family: 'Courier New', monospace;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background: #00FF41;
+        color: black;
+        box-shadow: 0 0 20px #00FF41;
+    }
+</style>
+""", unsafe_allow_html=True)
 
+# Inicializar Estado
+if 'history' not in st.session_state:
+    st.session_state.history = {}
+    st.session_state.cycle_count = 0
+
+# --- SIDEBAR DE CONTROL ---
+with st.sidebar:
+    st.header("🎛️ Panel de Ingeniería")
+    with st.expander("⚖️ Ponderación de Riesgos", expanded=True):
+        w_s = st.slider("Seguridad (Personas)", 0.0, 1.0, 0.6)
+        w_o = st.slider("Operacional ($$)", 0.0, 1.0, 0.3)
+        w_e = st.slider("Ambiental (ISO 14001)", 0.0, 1.0, 0.1)
+        
+    st.divider()
+    if st.button("🔄 CICLO DE ESCANEO (SIMULAR)", type="primary", use_container_width=True):
+        st.session_state.cycle_count += 1
+    
+    st.caption(f"Ciclos ejecutados: {st.session_state.cycle_count}")
+    
+    if st.button("🗑️ Resetear Historial"):
+        st.session_state.history = {}
+        st.success("Buffer de memoria borrado.")
+
+# --- INICIALIZAR MOTOR ---
 total = w_s + w_o + w_e
 if total == 0: total = 1 
 engine = CriticalityEngine(w_s/total, w_o/total, w_e/total)
 
-# --- 6. GESTIÓN DE DATOS (EDITABLES) ---
+# DATOS BASE
 if 'data' not in st.session_state:
     st.session_state.data = pd.DataFrame([
-        {'id': 'ACOMETIDA', 'label': 'Acometida MT', 'group': 'FUENTE', 'S_score': 10, 'O_score': 10, 'E_score': 5, 'install_year': 2010, 'useful_life': 40, 'R_red': 1.0},
-        {'id': 'TR-01', 'label': 'Trafo General', 'group': 'DIST', 'S_score': 9, 'O_score': 10, 'E_score': 5, 'install_year': 1995, 'useful_life': 30, 'R_red': 1.0},
-        {'id': 'CGBT', 'label': 'Cuadro General', 'group': 'DIST', 'S_score': 8, 'O_score': 10, 'E_score': 2, 'install_year': 2000, 'useful_life': 30, 'R_red': 1.0},
-        {'id': 'SAI-01', 'label': 'UPS IT', 'group': 'BACKUP', 'S_score': 2, 'O_score': 9, 'E_score': 1, 'install_year': 2023, 'useful_life': 10, 'R_red': 2.0},
-        {'id': 'SRV-RACK', 'label': 'Rack Servidores', 'group': 'LOAD', 'S_score': 1, 'O_score': 9, 'E_score': 0, 'install_year': 2020, 'useful_life': 10, 'R_red': 1.0},
-        {'id': 'MOTOR-01', 'label': 'Compresor Aire', 'group': 'LOAD', 'S_score': 4, 'O_score': 7, 'E_score': 3, 'install_year': 2005, 'useful_life': 15, 'R_red': 1.0},
+        {'id': 'ACOMETIDA', 'label': 'Acometida 20kV', 'group': 'GRID', 'S_score': 10, 'O_score': 10, 'E_score': 5, 'install_year': 2010, 'useful_life': 40, 'R_red': 1.0},
+        {'id': 'TR-01', 'label': 'Trafo Principal', 'group': 'TRANSF', 'S_score': 9, 'O_score': 10, 'E_score': 8, 'install_year': 1990, 'useful_life': 35, 'R_red': 1.0},
+        {'id': 'CGBT', 'label': 'Cuadro General BT', 'group': 'PANEL', 'S_score': 8, 'O_score': 9, 'E_score': 2, 'install_year': 2005, 'useful_life': 25, 'R_red': 1.0},
+        {'id': 'GEN-01', 'label': 'Grupo Electrógeno', 'group': 'BACKUP', 'S_score': 3, 'O_score': 8, 'E_score': 6, 'install_year': 2015, 'useful_life': 20, 'R_red': 2.0},
+        {'id': 'MOTOR-A', 'label': 'Bomba Hidráulica', 'group': 'MOTOR', 'S_score': 5, 'O_score': 7, 'E_score': 4, 'install_year': 2018, 'useful_life': 12, 'R_red': 1.0},
+        {'id': 'SRV-ROOM', 'label': 'Clima DataCenter', 'group': 'HVAC', 'S_score': 1, 'O_score': 9, 'E_score': 1, 'install_year': 2021, 'useful_life': 10, 'R_red': 1.5},
     ])
 
-st.subheader("📝 Inventario de Activos (Editable)")
-st.info("Edita los valores en la tabla para recalcular la matriz. El sistema simulará sensores basándose en estos datos.")
+# CÁLCULOS
+df_processed = engine.compute_matrix(st.session_state.data)
 
-# Widget editable que actualiza el session_state
-edited_df = st.data_editor(st.session_state.data, num_rows="dynamic")
-
-# --- 7. PROCESAMIENTO ---
-# 1. Calcular estática
-df_processed = engine.compute_matrix(edited_df)
-
-# 2. Simulación de Tiempo Real (Botón de Pánico / Refresco)
-if st.button("🔄 Ejecutar Ciclo de Escaneo de Sensores (Simulación)"):
-    # Aplicar lógica de protección
+if st.session_state.cycle_count > 0:
     realtime_data = df_processed.apply(engine.evaluate_protection_logic, axis=1)
-    realtime_data.columns = ['Temp_Actual', 'Vib_Actual', 'RealTime_Status', 'RealTime_Msg']
+    realtime_data.columns = ['Temp_Actual', 'Vib_Actual', 'RealTime_Status', 'RealTime_Msg', 'Limit_Trip', 'Limit_Alarm', 'Status_Color']
     df_final = pd.concat([df_processed, realtime_data], axis=1)
 else:
-    # Estado inicial sin datos de sensores
     df_final = df_processed.copy()
-    df_final['Temp_Actual'] = 0.0
-    df_final['Vib_Actual'] = 0.0
-    df_final['RealTime_Status'] = "ESPERA"
-    df_final['RealTime_Msg'] = "Esperando ciclo..."
+    for col in ['Temp_Actual', 'Vib_Actual', 'Limit_Trip', 'Limit_Alarm']: df_final[col] = 0.0
+    df_final['RealTime_Status'] = "OFFLINE"
+    df_final['RealTime_Msg'] = "Sistema detenido"
+    df_final['Status_Color'] = "grey"
 
-# Ordenar por riesgo
 df_sorted = df_final.sort_values('MCVD_Index', ascending=False)
 
-# --- 8. VISUALIZACIÓN ---
-col1, col2 = st.columns([3, 1])
+# --- DASHBOARD VISUAL ---
+st.title("⚡ MCVD: Sistema de Protección Adaptativa")
+st.markdown("### Centro de Control de Activos Críticos")
 
-connections = [('ACOMETIDA', 'TR-01'), ('TR-01', 'CGBT'), ('CGBT', 'SAI-01'), ('CGBT', 'MOTOR-01'), ('SAI-01', 'SRV-RACK')]
+kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+n_alarms = len(df_sorted[df_sorted['RealTime_Status'].str.contains("ALARM")])
+n_trips = len(df_sorted[df_sorted['RealTime_Status'].str.contains("TRIP")])
+max_risk = df_sorted['MCVD_Index'].max()
 
-with col1:
-    st.subheader("Topología de Estado en Tiempo Real")
-    net = Network(height='500px', width='100%', bgcolor='#1E1E1E', font_color='white')
+kpi1.metric("Activos Monitoreados", len(df_sorted), delta="Online")
+kpi2.metric("Riesgo Máximo (MCVD)", f"{max_risk:.2f}", delta="-Critico" if max_risk > 8 else "Normal", delta_color="inverse")
+kpi3.metric("Alarmas Activas", n_alarms, delta="Requiere Atención" if n_alarms > 0 else "OK", delta_color="inverse")
+kpi4.metric("Disparos (TRIP)", n_trips, delta="STOP" if n_trips > 0 else "Normal", delta_color="inverse")
+
+st.divider()
+
+col_topology, col_detail = st.columns([2, 1])
+
+with col_topology:
+    st.subheader("🌐 Topología de Red")
+    # Ajustamos el fondo del grafo para que coincida con el tema oscuro (#050505)
+    net = Network(height='450px', width='100%', bgcolor='#050505', font_color='white')
+    shape_map = {'GRID': 'triangle', 'TRANSF': 'square', 'MOTOR': 'star', 'BACKUP': 'diamond', 'PANEL': 'box'}
     
     for index, row in df_sorted.iterrows():
-        # Lógica de colores del Nodo
-        color = '#00cc66' # Verde (OK)
-        if 'TRIP' in row['RealTime_Status']:
-            color = '#FF0000' # ROJO (DISPARADO)
-            label_node = f"❌ {row['label']} (OFF)"
-        elif row['MCVD_Index'] > 8:
-            color = '#ff9900' # Naranja (Riesgo Latente)
-            label_node = row['label']
-        else:
-            label_node = row['label']
+        color = "#00ff00" # Verde neón por defecto
+        if "ALARM" in row['RealTime_Status']: color = "#ffff00"
+        if "TRIP" in row['RealTime_Status']: color = "#ff0000"
+        size_val = 20 + (row['MCVD_Index'] * 3)
+        title_html = f"<b>{row['label']}</b><br>MCVD: {row['MCVD_Index']:.2f}<br>Temp: {row['Temp_Actual']:.1f}ºC"
+        net.add_node(row['id'], label=row['label'], title=title_html, color=color, shape=shape_map.get(row['group'], 'dot'), size=size_val)
 
-        size_val = 25 + (row['MCVD_Index'] * 2)
-        
-        # Tooltip técnico
-        title_html = (
-            f"<b>{row['label']}</b><br>"
-            f"MCVD Index: {row['MCVD_Index']:.2f}<br>"
-            f"Temp: {row['Temp_Actual']:.1f}ºC<br>"
-            f"Vib: {row['Vib_Actual']:.1f}mm/s<br>"
-            f"Status: {row['RealTime_Status']}"
-        )
-        
-        net.add_node(row['id'], label=label_node, title=title_html, color=color, size=size_val)
-
-    for source, target in connections:
-        # Verificar si nodos existen antes de crear aristas (por si el usuario borra filas)
-        ids = df_sorted['id'].values
-        if source in ids and target in ids:
-            net.add_edge(source, target, color='gray')
+    edges = [('ACOMETIDA', 'TR-01'), ('TR-01', 'CGBT'), ('CGBT', 'MOTOR-A'), ('CGBT', 'SRV-ROOM'), ('GEN-01', 'CGBT')]
+    for u, v in edges:
+        if u in df_sorted['id'].values and v in df_sorted['id'].values:
+            net.add_edge(u, v, color='#555555', width=2)
     
-    net.repulsion(node_distance=150, spring_length=150)
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp:
         net.save_graph(tmp.name)
         with open(tmp.name, 'r', encoding='utf-8') as f:
             html_string = f.read()
-    components.html(html_string, height=520)
+    components.html(html_string, height=470)
 
-with col2:
-    st.subheader("🚨 Panel de Eventos")
+    st.subheader("📋 Matriz de Activos")
+    # Estilizamos un poco el dataframe (aunque es nativo de streamlit, heredará algunos colores)
+    edited_df = st.data_editor(st.session_state.data, use_container_width=True, hide_index=True)
+    if not edited_df.equals(st.session_state.data):
+        st.session_state.data = edited_df
+        st.rerun()
+
+with col_detail:
+    st.subheader("📈 Análisis de Tendencias 3D")
+    selected_asset = st.selectbox("Seleccionar Activo:", df_sorted['label'].values)
+    selected_id = df_sorted[df_sorted['label'] == selected_asset]['id'].values[0]
     
-    # Filtrar solo los disparados
-    trips = df_sorted[df_sorted['RealTime_Status'].str.contains("TRIP")]
-    
-    if not trips.empty:
-        st.error(f"¡ALERTA! {len(trips)} DISPAROS ACTIVOS")
-        for _, trip in trips.iterrows():
-            with st.expander(f"❌ {trip['label']}", expanded=True):
-                st.write(f"**Causa:** {trip['RealTime_Msg']}")
-                st.caption(f"Index MCVD: {trip['MCVD_Index']:.2f}")
+    if selected_id in st.session_state.history:
+        hist = st.session_state.history[selected_id]
+        
+        # 1. Recuperamos las variables, incluyendo Vibración para el eje Z
+        df_hist = pd.DataFrame({
+            'Tiempo': list(hist['time']),
+            'Temp': list(hist['temp']),
+            'Vib': list(hist['vib']),    # Nueva Dimensión Z
+            'Limit': list(hist['limit']) 
+        })
+        
+        # 2. Creamos el Gráfico 3D Futurista
+        fig = go.Figure()
+        
+        # Trazo Principal: La línea de comportamiento del activo
+        fig.add_trace(go.Scatter3d(
+            x=df_hist['Tiempo'], 
+            y=df_hist['Temp'], 
+            z=df_hist['Vib'],
+            mode='lines+markers',
+            marker=dict(
+                size=5,
+                color=df_hist['Temp'],                # El color cambia con la temperatura
+                colorscale='Electric',                # Paleta de colores "Electric"
+                opacity=0.9
+            ),
+            line=dict(color='#00FFFF', width=5),      # Línea cian neón
+            name='Estado Activo'
+        ))
+
+        # Plano de Límite (Techo rojo semitransparente)
+        fig.add_trace(go.Surface(
+            z=[[0,0],[10,10]], # Un plano vertical referencial o suelo, aquí simplificado
+            x=[[df_hist['Tiempo'].iloc[0], df_hist['Tiempo'].iloc[-1]]]*2,
+            y=[[df_hist['Limit'].iloc[0], df_hist['Limit'].iloc[0]]]*2,
+            colorscale=[[0, 'red'], [1, 'red']],
+            opacity=0.1,
+            showscale=False,
+            name="Límite Trip"
+        ))
+
+        # Configuración de la Escena 3D (Grid minimalista)
+        fig.update_layout(
+            scene = dict(
+                xaxis = dict(title='TIEMPO', backgroundcolor="rgba(0,0,0,0)", gridcolor="#444", showbackground=True, tickfont=dict(color="#00FF41")),
+                yaxis = dict(title='TEMP (ºC)', backgroundcolor="rgba(0,0,0,0)", gridcolor="#444", showbackground=True, tickfont=dict(color="#00FF41")),
+                zaxis = dict(title='VIB (mm/s)', backgroundcolor="rgba(0,0,0,0)", gridcolor="#444", showbackground=True, tickfont=dict(color="#00FF41")),
+            ),
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            margin=dict(l=0, r=0, t=0, b=0),
+            height=450,
+            font=dict(family="Courier New", color="#00FFFF"),
+            showlegend=False
+        )
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Mensaje de estado estilizado
+        row_detail = df_sorted[df_sorted['id'] == selected_id].iloc[0]
+        status_color = "red" if "TRIP" in row_detail['RealTime_Status'] else "#00FF41"
+        
+        st.markdown(f"""
+        <div style="border: 1px solid {status_color}; padding: 10px; border-radius: 5px; background: rgba(0,0,0,0.5); text-align: center;">
+            <h3 style="margin:0; color: {status_color} !important;">ESTADO: {row_detail['RealTime_Msg']}</h3>
+        </div>
+        """, unsafe_allow_html=True)
+
     else:
-        st.success("SISTEMA ESTABLE. Ningún parámetro excede el umbral dinámico.")
+        st.warning("⚠️ SISTEMA EN ESPERA... INICIE SIMULACIÓN")
 
     st.markdown("---")
-    
-    # GENERAR PDF
-    if st.button("📄 Descargar Informe Oficial"):
+    if st.button("Descargar Informe PDF"):
         pdf_bytes = create_pdf_report(df_sorted)
-        st.download_button(
-            label="Guardar PDF",
-            data=pdf_bytes,
-            file_name="Reporte_Proteccion_MCVD.pdf",
-            mime="application/pdf"
-        )
-
-# --- 9. DATOS TÉCNICOS ---
-st.markdown("### Telemetría Detallada")
-# Estilizar la tabla para resaltar los disparos
-def highlight_trip(row):
-    if 'TRIP' in row['RealTime_Status']:
-        return ['background-color: #ffcccc; color: black'] * len(row)
-    else:
-        return [''] * len(row)
-
-st.dataframe(
-    df_sorted[['label', 'MCVD_Index', 'Temp_Actual', 'Vib_Actual', 'RealTime_Status', 'RealTime_Msg']]
-    .style.apply(highlight_trip, axis=1)
-    .format({'MCVD_Index': "{:.2f}", 'Temp_Actual': "{:.1f}ºC", 'Vib_Actual': "{:.1f}"})
-)
+        st.download_button("💾 Guardar PDF", data=pdf_bytes, file_name=f"MCVD_Report_{datetime.now().strftime('%H%M')}.pdf", mime="application/pdf")
