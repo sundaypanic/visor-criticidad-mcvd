@@ -1,5 +1,0 @@
-streamlit
-pandas
-pyvis
-fpdf
-plotly
